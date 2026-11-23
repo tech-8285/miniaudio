@@ -1456,6 +1456,15 @@ starting volume:
     ma_sound_set_fade_in_milliseconds(&sound, -1, 0, 1000);
     ```
 
+The target of a fade that's currently in progress can be changed with `ma_sound_set_fade_target()`.
+The fade will continue from the volume the next frame would have used and reach the new target at
+the same time the old fade was originally going to end:
+
+    ```c
+    // Change the target of the current fade to 0.5, keeping the remaining fade time.
+    ma_sound_set_fade_target(&sound, 0.5f);
+    ```
+
 By default sounds will start immediately, but sometimes for timing and synchronization purposes it
 can be useful to schedule a sound to start or stop:
 
@@ -5131,6 +5140,7 @@ MA_API ma_result ma_fader_process_pcm_frames(ma_fader* pFader, void* pFramesOut,
 MA_API void ma_fader_get_data_format(const ma_fader* pFader, ma_format* pFormat, ma_uint32* pChannels, ma_uint32* pSampleRate);
 MA_API void ma_fader_set_fade(ma_fader* pFader, float volumeBeg, float volumeEnd, ma_uint64 lengthInFrames);
 MA_API void ma_fader_set_fade_ex(ma_fader* pFader, float volumeBeg, float volumeEnd, ma_uint64 lengthInFrames, ma_int64 startOffsetInFrames);
+MA_API void ma_fader_set_fade_target(ma_fader* pFader, float volumeEnd);
 MA_API float ma_fader_get_current_volume(const ma_fader* pFader);
 
 
@@ -11206,6 +11216,7 @@ typedef struct
         ma_atomic_float volumeEnd;
         ma_atomic_uint64 fadeLengthInFrames;            /* <-- Defaults to (~(ma_uint64)0) which is used to indicate that no fade should be applied. */
         ma_atomic_uint64 absoluteGlobalTimeInFrames;    /* <-- The time to start the fade. */
+        ma_atomic_bool32 isFadeRetarget;                /* <-- When set to true, the pending fade change retargets the current fade (ma_fader_set_fade_target()) instead of starting a new one. */
     } fadeSettings;
 
     /* Memory management. */
@@ -11465,6 +11476,7 @@ MA_API void ma_sound_set_fade_in_pcm_frames(ma_sound* pSound, float volumeBeg, f
 MA_API void ma_sound_set_fade_in_milliseconds(ma_sound* pSound, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInMilliseconds);
 MA_API void ma_sound_set_fade_start_in_pcm_frames(ma_sound* pSound, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInFrames, ma_uint64 absoluteGlobalTimeInFrames);
 MA_API void ma_sound_set_fade_start_in_milliseconds(ma_sound* pSound, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInMilliseconds, ma_uint64 absoluteGlobalTimeInMilliseconds);
+MA_API void ma_sound_set_fade_target(ma_sound* pSound, float volumeEnd);
 MA_API float ma_sound_get_current_fade_volume(const ma_sound* pSound);
 MA_API void ma_sound_set_start_time_in_pcm_frames(ma_sound* pSound, ma_uint64 absoluteGlobalTimeInFrames);
 MA_API void ma_sound_set_start_time_in_milliseconds(ma_sound* pSound, ma_uint64 absoluteGlobalTimeInMilliseconds);
@@ -11535,6 +11547,7 @@ MA_API void ma_sound_group_set_directional_attenuation_factor(ma_sound_group* pG
 MA_API float ma_sound_group_get_directional_attenuation_factor(const ma_sound_group* pGroup);
 MA_API void ma_sound_group_set_fade_in_pcm_frames(ma_sound_group* pGroup, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInFrames);
 MA_API void ma_sound_group_set_fade_in_milliseconds(ma_sound_group* pGroup, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInMilliseconds);
+MA_API void ma_sound_group_set_fade_target(ma_sound_group* pGroup, float volumeEnd);
 MA_API float ma_sound_group_get_current_fade_volume(ma_sound_group* pGroup);
 MA_API void ma_sound_group_set_start_time_in_pcm_frames(ma_sound_group* pGroup, ma_uint64 absoluteGlobalTimeInFrames);
 MA_API void ma_sound_group_set_start_time_in_milliseconds(ma_sound_group* pGroup, ma_uint64 absoluteGlobalTimeInMilliseconds);
@@ -51649,6 +51662,47 @@ MA_API void ma_fader_set_fade_ex(ma_fader* pFader, float volumeBeg, float volume
     pFader->cursorInFrames = -startOffsetInFrames;
 }
 
+MA_API void ma_fader_set_fade_target(ma_fader* pFader, float volumeEnd)
+{
+    if (pFader == NULL) {
+        return;
+    }
+
+    /*
+    If the fade hasn't started yet, keep the scheduled starting point and only change the
+    target. The fade will still begin at the scheduled time and from the scheduled starting
+    volume, but will now ramp towards the new target.
+    */
+    if (pFader->cursorInFrames < 0) {
+        pFader->volumeEnd = volumeEnd;
+        return;
+    }
+
+    /*
+    If there's no time remaining on the fade, adopt the new target immediately. Setting
+    volumeBeg and volumeEnd to the same value means ma_fader_process_pcm_frames() will run
+    as a constant volume from here on.
+    */
+    if ((ma_uint64)pFader->cursorInFrames >= pFader->lengthInFrames) {  /* Safe cast because the < 0 case was checked above. */
+        pFader->volumeBeg      = volumeEnd;
+        pFader->volumeEnd      = volumeEnd;
+        pFader->lengthInFrames = 0;
+        pFader->cursorInFrames = 0;
+        return;
+    }
+
+    /*
+    The fade is part way through. Start a new fade from the volume the next frame would have
+    used (which is the current volume at the cursor) such that the new target is reached at
+    the same frame the old fade would have ended. This can be done any number of times on
+    the same fade.
+    */
+    pFader->volumeBeg       = ma_fader_get_current_volume(pFader);
+    pFader->volumeEnd       = volumeEnd;
+    pFader->lengthInFrames -= (ma_uint64)pFader->cursorInFrames;    /* Safe cast because the < 0 case was checked above. */
+    pFader->cursorInFrames  = 0;
+}
+
 MA_API float ma_fader_get_current_volume(const ma_fader* pFader)
 {
     if (pFader == NULL) {
@@ -76950,16 +77004,23 @@ static void ma_engine_node_process_pcm_frames__general(ma_engine_node* pEngineNo
     {
         ma_uint64 fadeLengthInFrames = ma_atomic_uint64_get(&pEngineNode->fadeSettings.fadeLengthInFrames);
         if (fadeLengthInFrames != ~(ma_uint64)0) {
-            float fadeVolumeBeg = ma_atomic_float_get(&pEngineNode->fadeSettings.volumeBeg);
-            float fadeVolumeEnd = ma_atomic_float_get(&pEngineNode->fadeSettings.volumeEnd);
-            ma_int64 fadeStartOffsetInFrames = (ma_int64)ma_atomic_uint64_get(&pEngineNode->fadeSettings.absoluteGlobalTimeInFrames);
-            if (fadeStartOffsetInFrames == (ma_int64)(~(ma_uint64)0)) {
-                fadeStartOffsetInFrames = 0;
+            if (ma_atomic_bool32_get(&pEngineNode->fadeSettings.isFadeRetarget)) {
+                /* The fade is being retargeted. Only the target volume is relevant - the fader will derive everything else from its current state. */
+                float fadeVolumeEnd = ma_atomic_float_get(&pEngineNode->fadeSettings.volumeEnd);
+                ma_fader_set_fade_target(&pEngineNode->fader, fadeVolumeEnd);
+                ma_atomic_bool32_set(&pEngineNode->fadeSettings.isFadeRetarget, MA_FALSE);
             } else {
-                fadeStartOffsetInFrames -= ma_engine_get_time_in_pcm_frames(pEngineNode->pEngine);
-            }
+                float fadeVolumeBeg = ma_atomic_float_get(&pEngineNode->fadeSettings.volumeBeg);
+                float fadeVolumeEnd = ma_atomic_float_get(&pEngineNode->fadeSettings.volumeEnd);
+                ma_int64 fadeStartOffsetInFrames = (ma_int64)ma_atomic_uint64_get(&pEngineNode->fadeSettings.absoluteGlobalTimeInFrames);
+                if (fadeStartOffsetInFrames == (ma_int64)(~(ma_uint64)0)) {
+                    fadeStartOffsetInFrames = 0;
+                } else {
+                    fadeStartOffsetInFrames -= ma_engine_get_time_in_pcm_frames(pEngineNode->pEngine);
+                }
 
-            ma_fader_set_fade_ex(&pEngineNode->fader, fadeVolumeBeg, fadeVolumeEnd, fadeLengthInFrames, fadeStartOffsetInFrames);
+                ma_fader_set_fade_ex(&pEngineNode->fader, fadeVolumeBeg, fadeVolumeEnd, fadeLengthInFrames, fadeStartOffsetInFrames);
+            }
 
             /* Reset the fade length so we don't erroneously apply it again. */
             ma_atomic_uint64_set(&pEngineNode->fadeSettings.fadeLengthInFrames, ~(ma_uint64)0);
@@ -77518,6 +77579,7 @@ MA_API ma_result ma_engine_node_init_preallocated(const ma_engine_node_config* p
     ma_atomic_float_set(&pEngineNode->fadeSettings.volumeEnd, 1);
     ma_atomic_uint64_set(&pEngineNode->fadeSettings.fadeLengthInFrames, (~(ma_uint64)0));
     ma_atomic_uint64_set(&pEngineNode->fadeSettings.absoluteGlobalTimeInFrames, (~(ma_uint64)0));   /* <-- Indicates that the fade should start immediately. */
+    ma_atomic_bool32_set(&pEngineNode->fadeSettings.isFadeRetarget, MA_FALSE);
 
     channelsIn  = (pConfig->channelsIn  != 0) ? pConfig->channelsIn  : ma_engine_get_channels(pConfig->pEngine);
     channelsOut = (pConfig->channelsOut != 0) ? pConfig->channelsOut : ma_engine_get_channels(pConfig->pEngine);
@@ -79531,10 +79593,28 @@ MA_API void ma_sound_set_fade_start_in_pcm_frames(ma_sound* pSound, float volume
     to derive the fader's start offset. The timer is being updated on the audio thread so in order to
     do this as accurately as possible we'll need to defer this to the audio thread.
     */
+    ma_atomic_bool32_set(&pSound->engineNode.fadeSettings.isFadeRetarget, MA_FALSE);
     ma_atomic_float_set(&pSound->engineNode.fadeSettings.volumeBeg, volumeBeg);
     ma_atomic_float_set(&pSound->engineNode.fadeSettings.volumeEnd, volumeEnd);
     ma_atomic_uint64_set(&pSound->engineNode.fadeSettings.fadeLengthInFrames, fadeLengthInFrames);
     ma_atomic_uint64_set(&pSound->engineNode.fadeSettings.absoluteGlobalTimeInFrames, absoluteGlobalTimeInFrames);
+}
+
+MA_API void ma_sound_set_fade_target(ma_sound* pSound, float volumeEnd)
+{
+    if (pSound == NULL) {
+        return;
+    }
+
+    /*
+    Like ma_sound_set_fade_start_in_pcm_frames(), this is deferred to the audio thread because the
+    fader's current state is only known there. The fader will continue the current fade from the
+    volume the next frame would have used and reach the new target at the frame the current fade
+    was originally going to end.
+    */
+    ma_atomic_float_set(&pSound->engineNode.fadeSettings.volumeEnd, volumeEnd);
+    ma_atomic_bool32_set(&pSound->engineNode.fadeSettings.isFadeRetarget, MA_TRUE);
+    ma_atomic_uint64_set(&pSound->engineNode.fadeSettings.fadeLengthInFrames, 0);   /* <-- The actual length is irrelevant for a retarget. This just triggers the update on the audio thread. */
 }
 
 MA_API void ma_sound_set_fade_start_in_milliseconds(ma_sound* pSound, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInMilliseconds, ma_uint64 absoluteGlobalTimeInMilliseconds)
@@ -80128,6 +80208,11 @@ MA_API void ma_sound_group_set_fade_in_pcm_frames(ma_sound_group* pGroup, float 
 MA_API void ma_sound_group_set_fade_in_milliseconds(ma_sound_group* pGroup, float volumeBeg, float volumeEnd, ma_uint64 fadeLengthInMilliseconds)
 {
     ma_sound_set_fade_in_milliseconds(pGroup, volumeBeg, volumeEnd, fadeLengthInMilliseconds);
+}
+
+MA_API void ma_sound_group_set_fade_target(ma_sound_group* pGroup, float volumeEnd)
+{
+    ma_sound_set_fade_target(pGroup, volumeEnd);
 }
 
 MA_API float ma_sound_group_get_current_fade_volume(ma_sound_group* pGroup)
