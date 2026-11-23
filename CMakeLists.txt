@@ -790,6 +790,9 @@ if(MINIAUDIO_BUILD_TESTS)
     
     add_miniaudio_test(miniaudio_generation generation/generation.c)
     add_test(NAME miniaudio_generation COMMAND miniaudio_generation)
+
+    add_miniaudio_test(miniaudio_datasource datasource/datasource.c)
+    add_test(NAME miniaudio_datasource COMMAND miniaudio_datasource)
 endif()
 
 # Examples
