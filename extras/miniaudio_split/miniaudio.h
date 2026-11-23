@@ -1286,6 +1286,7 @@ typedef struct
     float wet;                  /* 0..1. Default = 1. */
     float dry;                  /* 0..1. Default = 1. */
     float decay;                /* 0..1. Default = 0 (no feedback). Feedback decay. Use this for echo. */
+    float crossFeedback;        /* 0..1. Default = 0 (no cross feedback). Stereo only. The fraction of each feedback sample that is routed to the opposite channel. The remainder stays in the source channel. */
 } ma_delay_config;
 
 MA_API ma_delay_config ma_delay_config_init(ma_uint32 channels, ma_uint32 sampleRate, ma_uint32 delayInFrames, float decay);
@@ -1308,6 +1309,8 @@ MA_API void ma_delay_set_dry(ma_delay* pDelay, float value);
 MA_API float ma_delay_get_dry(const ma_delay* pDelay);
 MA_API void ma_delay_set_decay(ma_delay* pDelay, float value);
 MA_API float ma_delay_get_decay(const ma_delay* pDelay);
+MA_API void ma_delay_set_cross_feedback(ma_delay* pDelay, float value);
+MA_API float ma_delay_get_cross_feedback(const ma_delay* pDelay);
 
 
 /* Gainer for smooth volume changes. */
@@ -7389,6 +7392,8 @@ MA_API void ma_delay_node_set_dry(ma_delay_node* pDelayNode, float value);
 MA_API float ma_delay_node_get_dry(const ma_delay_node* pDelayNode);
 MA_API void ma_delay_node_set_decay(ma_delay_node* pDelayNode, float value);
 MA_API float ma_delay_node_get_decay(const ma_delay_node* pDelayNode);
+MA_API void ma_delay_node_set_cross_feedback(ma_delay_node* pDelayNode, float value);
+MA_API float ma_delay_node_get_cross_feedback(const ma_delay_node* pDelayNode);
 #endif  /* MA_NO_NODE_GRAPH */
 
 

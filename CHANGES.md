@@ -1,3 +1,7 @@
+Unreleased
+==========
+* Added adjustable stereo cross feedback to the delay effect (`ma_delay` and `ma_delay_node`). Use the new `crossFeedback` config member, or `ma_delay_set_cross_feedback()` / `ma_delay_node_set_cross_feedback()` at runtime, to control the fraction of each feedback sample routed to the opposite channel. The remainder stays in the source channel and the total feedback attenuation is still determined by `decay`. Only stereo processing is affected; other channel counts ignore the setting.
+
 v0.11.26 - 2026-10-31
 =====================
 * Fixed a bug where the ends of sounds are cutoff. This affects `ma_sound`.

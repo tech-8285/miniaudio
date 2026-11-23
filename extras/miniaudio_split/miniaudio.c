@@ -39016,6 +39016,7 @@ MA_API ma_delay_config ma_delay_config_init(ma_uint32 channels, ma_uint32 sample
     config.wet           = 1;
     config.dry           = 1;
     config.decay         = decay;
+    config.crossFeedback = 0;
 
     return config;
 }
@@ -39034,6 +39035,10 @@ MA_API ma_result ma_delay_init(const ma_delay_config* pConfig, const ma_allocati
     }
 
     if (pConfig->decay < 0 || pConfig->decay > 1) {
+        return MA_INVALID_ARGS;
+    }
+
+    if (pConfig->crossFeedback < 0 || pConfig->crossFeedback > 1) {
         return MA_INVALID_ARGS;
     }
 
@@ -39071,33 +39076,83 @@ MA_API ma_result ma_delay_process_pcm_frames(ma_delay* pDelay, void* pFramesOut,
         return MA_INVALID_ARGS;
     }
 
-    for (iFrame = 0; iFrame < frameCount; iFrame += 1) {
-        for (iChannel = 0; iChannel < pDelay->config.channels; iChannel += 1) {
-            ma_uint32 iBuffer = (pDelay->cursor * pDelay->config.channels) + iChannel;
+    if (pDelay->config.channels == 2 && pDelay->config.crossFeedback > 0) {
+        /*
+        Stereo cross feedback. A fraction of each feedback sample (crossFeedback) is routed to the
+        opposite channel, with the remainder staying in the source channel. The total attenuation of
+        each feedback sample is determined entirely by decay. The dry input is never crossed so that
+        the position of the original sound is preserved.
+
+        The feedback is computed from the buffer contents before anything is written back, otherwise
+        the two channels would contaminate each other within the same frame. Changing crossFeedback
+        while the delay is running only affects feedback written from the next processed frame onward;
+        any tail already sitting in the delay line keeps playing back on its original channel.
+        */
+        float cross = pDelay->config.crossFeedback;
+        float keep  = 1.0f - cross;
+
+        for (iFrame = 0; iFrame < frameCount; iFrame += 1) {
+            ma_uint32 iBufferL = (pDelay->cursor * 2) + 0;
+            ma_uint32 iBufferR = (pDelay->cursor * 2) + 1;
+            float oldL = pDelay->pBuffer[iBufferL];
+            float oldR = pDelay->pBuffer[iBufferR];
+            float feedbackL = (oldL * pDelay->config.decay);
+            float feedbackR = (oldR * pDelay->config.decay);
 
             if (pDelay->config.delayStart) {
                 /* Delayed start. */
 
                 /* Read */
-                pFramesOutF32[iChannel] = pDelay->pBuffer[iBuffer] * pDelay->config.wet;
+                pFramesOutF32[0] = oldL * pDelay->config.wet;
+                pFramesOutF32[1] = oldR * pDelay->config.wet;
+            }
 
-                /* Feedback */
-                pDelay->pBuffer[iBuffer] = (pDelay->pBuffer[iBuffer] * pDelay->config.decay) + (pFramesInF32[iChannel] * pDelay->config.dry);
-            } else {
+            /* Feedback */
+            pDelay->pBuffer[iBufferL] = (feedbackL * keep) + (feedbackR * cross) + (pFramesInF32[0] * pDelay->config.dry);
+            pDelay->pBuffer[iBufferR] = (feedbackR * keep) + (feedbackL * cross) + (pFramesInF32[1] * pDelay->config.dry);
+
+            if (!pDelay->config.delayStart) {
                 /* Immediate start */
 
-                /* Feedback */
-                pDelay->pBuffer[iBuffer] = (pDelay->pBuffer[iBuffer] * pDelay->config.decay) + (pFramesInF32[iChannel] * pDelay->config.dry);
-
                 /* Read */
-                pFramesOutF32[iChannel] = pDelay->pBuffer[iBuffer] * pDelay->config.wet;
+                pFramesOutF32[0] = pDelay->pBuffer[iBufferL] * pDelay->config.wet;
+                pFramesOutF32[1] = pDelay->pBuffer[iBufferR] * pDelay->config.wet;
             }
+
+            pDelay->cursor = (pDelay->cursor + 1) % pDelay->bufferSizeInFrames;
+
+            pFramesOutF32 += 2;
+            pFramesInF32  += 2;
         }
+    } else {
+        for (iFrame = 0; iFrame < frameCount; iFrame += 1) {
+            for (iChannel = 0; iChannel < pDelay->config.channels; iChannel += 1) {
+                ma_uint32 iBuffer = (pDelay->cursor * pDelay->config.channels) + iChannel;
 
-        pDelay->cursor = (pDelay->cursor + 1) % pDelay->bufferSizeInFrames;
+                if (pDelay->config.delayStart) {
+                    /* Delayed start. */
 
-        pFramesOutF32 += pDelay->config.channels;
-        pFramesInF32  += pDelay->config.channels;
+                    /* Read */
+                    pFramesOutF32[iChannel] = pDelay->pBuffer[iBuffer] * pDelay->config.wet;
+
+                    /* Feedback */
+                    pDelay->pBuffer[iBuffer] = (pDelay->pBuffer[iBuffer] * pDelay->config.decay) + (pFramesInF32[iChannel] * pDelay->config.dry);
+                } else {
+                    /* Immediate start */
+
+                    /* Feedback */
+                    pDelay->pBuffer[iBuffer] = (pDelay->pBuffer[iBuffer] * pDelay->config.decay) + (pFramesInF32[iChannel] * pDelay->config.dry);
+
+                    /* Read */
+                    pFramesOutF32[iChannel] = pDelay->pBuffer[iBuffer] * pDelay->config.wet;
+                }
+            }
+
+            pDelay->cursor = (pDelay->cursor + 1) % pDelay->bufferSizeInFrames;
+
+            pFramesOutF32 += pDelay->config.channels;
+            pFramesInF32  += pDelay->config.channels;
+        }
     }
 
     return MA_SUCCESS;
@@ -39155,6 +39210,28 @@ MA_API float ma_delay_get_decay(const ma_delay* pDelay)
     }
 
     return pDelay->config.decay;
+}
+
+MA_API void ma_delay_set_cross_feedback(ma_delay* pDelay, float value)
+{
+    if (pDelay == NULL) {
+        return;
+    }
+
+    if (value < 0 || value > 1) {
+        return;
+    }
+
+    pDelay->config.crossFeedback = value;
+}
+
+MA_API float ma_delay_get_cross_feedback(const ma_delay* pDelay)
+{
+    if (pDelay == NULL) {
+        return 0;
+    }
+
+    return pDelay->config.crossFeedback;
 }
 
 
@@ -65239,6 +65316,24 @@ MA_API float ma_delay_node_get_decay(const ma_delay_node* pDelayNode)
     }
 
     return ma_delay_get_decay(&pDelayNode->delay);
+}
+
+MA_API void ma_delay_node_set_cross_feedback(ma_delay_node* pDelayNode, float value)
+{
+    if (pDelayNode == NULL) {
+        return;
+    }
+
+    ma_delay_set_cross_feedback(&pDelayNode->delay, value);
+}
+
+MA_API float ma_delay_node_get_cross_feedback(const ma_delay_node* pDelayNode)
+{
+    if (pDelayNode == NULL) {
+        return 0;
+    }
+
+    return ma_delay_get_cross_feedback(&pDelayNode->delay);
 }
 #endif  /* MA_NO_NODE_GRAPH */
 
